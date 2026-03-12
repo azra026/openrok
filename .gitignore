@@ -1,0 +1,6 @@
+/target
+/.env
+/.env.client
+/.env.server
+/.DS_Store
+/AGENTS.md
