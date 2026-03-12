@@ -14,12 +14,12 @@ use axum::{
     Router,
     body::{Body, to_bytes},
     extract::{
-        ConnectInfo, Request, State,
+        ConnectInfo, Path, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
@@ -29,7 +29,7 @@ use openrok_shared::protocol::{
 };
 use tokio::sync::Mutex;
 use tokio::{net::TcpListener, sync::mpsc, time::timeout};
-use tracing::info;
+use tracing::{debug, info, warn};
 
 use crate::tunnel_manager::CreateTunnelError;
 use crate::tunnel_manager::TunnelManager;
@@ -86,6 +86,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .route("/tunnels", post(create_tunnel))
         .route("/ws", get(websocket_upgrade))
+        .route("/_openrok/{public_host}", any(preview_proxy_root))
+        .route("/_openrok/{public_host}/{*path}", any(preview_proxy_path))
         .fallback(host_proxy_request)
         .with_state(state);
 
@@ -93,7 +95,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to bind relay server")?;
 
-    info!("server listening on http://{}", bind);
+    info!(
+        bind = %bind,
+        domain = %domain,
+        create_limit_per_minute,
+        "relay server listening"
+    );
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -126,7 +133,14 @@ async fn create_tunnel(
     axum::Json(request): axum::Json<CreateTunnelRequest>,
 ) -> impl IntoResponse {
     let remote_ip = remote_addr.ip().to_string();
+    info!(
+        remote_ip = %remote_ip,
+        port = request.port,
+        subdomain = ?request.subdomain,
+        "received tunnel creation request"
+    );
     if !state.create_limiter.allow(&remote_ip).await {
+        warn!(remote_ip = %remote_ip, "tunnel creation rate limit exceeded");
         return text_response(
             StatusCode::TOO_MANY_REQUESTS,
             "tunnel creation rate limit exceeded",
@@ -134,22 +148,56 @@ async fn create_tunnel(
     }
 
     match state.tunnel_manager.create_tunnel(request).await {
-        Ok(created) => (
-            StatusCode::CREATED,
-            axum::Json(ControlMessage::TunnelCreated(created)),
-        )
-            .into_response(),
+        Ok(created) => {
+            info!(
+                remote_ip = %remote_ip,
+                tunnel_id = %created.tunnel_id,
+                public_url = %created.url,
+                local_addr = %created.local_addr,
+                "created tunnel reservation"
+            );
+            (
+                StatusCode::CREATED,
+                axum::Json(ControlMessage::TunnelCreated(created)),
+            )
+                .into_response()
+        }
         Err(CreateTunnelError::InvalidSubdomain) => {
+            warn!(remote_ip = %remote_ip, "invalid tunnel subdomain requested");
             text_response(StatusCode::BAD_REQUEST, "invalid subdomain")
         }
         Err(CreateTunnelError::SubdomainUnavailable) => {
+            warn!(remote_ip = %remote_ip, "requested tunnel subdomain is unavailable");
             text_response(StatusCode::CONFLICT, "subdomain unavailable")
         }
     }
 }
 
 async fn host_proxy_request(State(state): State<AppState>, request: Request) -> Response<Body> {
-    match proxy_request_inner(state, request).await {
+    match proxy_request_inner(state, request, None, None).await {
+        Ok(response) => response,
+        Err((status, message)) => text_response(status, message),
+    }
+}
+
+async fn preview_proxy_root(
+    Path(public_host): Path<String>,
+    State(state): State<AppState>,
+    request: Request,
+) -> Response<Body> {
+    match proxy_request_inner(state, request, Some(public_host), Some("/".to_string())).await {
+        Ok(response) => response,
+        Err((status, message)) => text_response(status, message),
+    }
+}
+
+async fn preview_proxy_path(
+    Path((public_host, path)): Path<(String, String)>,
+    State(state): State<AppState>,
+    request: Request,
+) -> Response<Body> {
+    let normalized_path = format!("/{}", path.trim_start_matches('/'));
+    match proxy_request_inner(state, request, Some(public_host), Some(normalized_path)).await {
         Ok(response) => response,
         Err((status, message)) => text_response(status, message),
     }
@@ -158,16 +206,24 @@ async fn host_proxy_request(State(state): State<AppState>, request: Request) -> 
 async fn proxy_request_inner(
     state: AppState,
     request: Request,
+    host_override: Option<String>,
+    path_override: Option<String>,
 ) -> Result<Response<Body>, (StatusCode, String)> {
     let (parts, body) = request.into_parts();
-    let host = host_from_headers(&parts.headers).ok_or((
-        StatusCode::BAD_REQUEST,
-        "missing or invalid host header".to_string(),
-    ))?;
+    let method = parts.method.to_string();
+    let original_path = parts.uri.path().to_string();
+    let query = parts.uri.query().map(ToString::to_string);
+    let host = host_override
+        .or_else(|| host_from_headers(&parts.headers))
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "missing or invalid host header".to_string(),
+        ))?;
     let tunnel_id = state.tunnel_manager.tunnel_id_for_host(&host).ok_or((
         StatusCode::BAD_REQUEST,
         "missing or invalid host header".to_string(),
     ))?;
+    let forwarded_path = path_override.unwrap_or_else(|| original_path.clone());
     let body = to_bytes(body, 1024 * 1024).await.map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -175,14 +231,22 @@ async fn proxy_request_inner(
         )
     })?;
     let request_id = next_request_id();
-    let query = parts.uri.query().map(ToString::to_string);
     let headers = forwarded_headers(&parts.headers, &host);
+    info!(
+        request_id = %request_id,
+        tunnel_id = %tunnel_id,
+        host = %host,
+        method = %method,
+        path = %forwarded_path,
+        query = ?query,
+        "forwarding inbound request"
+    );
     let message = ControlMessage::ForwardRequest(ForwardRequest {
         tunnel_id: tunnel_id.clone(),
         request_id: request_id.clone(),
-        method: parts.method.to_string(),
-        path: parts.uri.path().to_string(),
-        query,
+        method,
+        path: forwarded_path,
+        query: query.clone(),
         headers,
         body_base64: encode_body(&body),
     });
@@ -191,17 +255,31 @@ async fn proxy_request_inner(
         .tunnel_manager
         .dispatch_request(&tunnel_id, request_id, message)
         .await
-        .map_err(|error| (StatusCode::NOT_FOUND, error.to_string()))?;
+        .map_err(|error| {
+            warn!(tunnel_id = %tunnel_id, host = %host, error = %error, "failed to dispatch request to client");
+            (StatusCode::NOT_FOUND, error.to_string())
+        })?;
 
     let forwarded = timeout(Duration::from_secs(10), response_rx)
         .await
         .map_err(|_| {
+            warn!(tunnel_id = %tunnel_id, host = %host, "tunnel request timed out");
             (
                 StatusCode::GATEWAY_TIMEOUT,
                 "tunnel request timed out".to_string(),
             )
         })?
-        .map_err(|_| (StatusCode::BAD_GATEWAY, "client disconnected".to_string()))?;
+        .map_err(|_| {
+            warn!(tunnel_id = %tunnel_id, host = %host, "client disconnected before replying");
+            (StatusCode::BAD_GATEWAY, "client disconnected".to_string())
+        })?;
+
+    info!(
+        tunnel_id = %tunnel_id,
+        host = %host,
+        status = forwarded.status,
+        "completed forwarded request"
+    );
 
     Ok(build_proxy_response(forwarded))
 }
@@ -256,12 +334,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     .await
                 {
                     Ok(()) => {
+                        info!(tunnel_id = %register.tunnel_id, "client registered control channel");
                         registered_tunnel_id = Some(register.tunnel_id.clone());
                         let _ = sender.send(ControlMessage::ClientRegistered(ClientRegistered {
                             tunnel_id: register.tunnel_id,
                         }));
                     }
-                    Err(_) => break,
+                    Err(error) => {
+                        warn!(tunnel_id = %register.tunnel_id, error = %error, "client registration rejected");
+                        break;
+                    }
                 }
             }
             ControlMessage::Heartbeat(heartbeat) => {
@@ -270,11 +352,20 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     .record_heartbeat(&heartbeat.tunnel_id)
                     .await
                 {
+                    debug!(tunnel_id = %heartbeat.tunnel_id, "received client heartbeat");
                     let _ = sender.send(ControlMessage::Heartbeat(heartbeat));
+                } else {
+                    warn!(tunnel_id = %heartbeat.tunnel_id, "received heartbeat for unknown session");
                 }
             }
             ControlMessage::ForwardResponse(response) => {
-                let _ = state.tunnel_manager.resolve_response(response).await;
+                let request_id = response.request_id.clone();
+                let status = response.status;
+                if state.tunnel_manager.resolve_response(response).await {
+                    debug!(request_id = %request_id, status, "resolved forwarded response");
+                } else {
+                    warn!(request_id = %request_id, "received response for unknown request");
+                }
             }
             _ => {}
         }
@@ -282,6 +373,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     writer.abort();
     if let Some(tunnel_id) = registered_tunnel_id {
+        info!(tunnel_id = %tunnel_id, "client disconnected");
         state.tunnel_manager.remove_client(&tunnel_id).await;
     }
 }
@@ -318,6 +410,7 @@ fn spawn_session_reaper(tunnel_manager: TunnelManager) {
                 .prune_stale_sessions(Duration::from_secs(90))
                 .await;
             tunnel_manager.prune_stale_reservations().await;
+            debug!("pruned stale sessions and reservations");
         }
     });
 }
@@ -519,6 +612,12 @@ mod tests {
                 .any(|header| header.name == "x-forwarded-proto")
         );
         assert!(forwarded.iter().all(|header| header.name != "host"));
+    }
+
+    #[test]
+    fn preview_path_is_normalized() {
+        let normalized = format!("/{}", "health".trim_start_matches('/'));
+        assert_eq!(normalized, "/health");
     }
 
     #[tokio::test]

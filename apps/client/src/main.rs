@@ -10,6 +10,7 @@ use openrok_shared::protocol::{
 use reqwest::Method;
 use tokio::time::{Duration, interval};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+use tracing::{debug, info, warn};
 
 type ControlSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -58,6 +59,7 @@ fn init_tracing() {
 }
 
 async fn run_http(server: &str, port: u16, subdomain: Option<String>) -> Result<()> {
+    info!(server, port, subdomain = ?subdomain, "requesting tunnel");
     let request = CreateTunnelRequest {
         protocol: TunnelProtocol::Http,
         port,
@@ -86,12 +88,16 @@ async fn run_http(server: &str, port: u16, subdomain: Option<String>) -> Result<
     println!("Tunnel ID: {}", created.tunnel_id);
     println!("Forwarding");
     println!("{} -> {}", created.url, created.local_addr);
+    println!("Local browser");
+    println!("{}", local_browser_url(server, &created.url));
     println!("Local test");
     println!(
         "curl -H 'Host: {}' {}/",
         public_host(&created.url),
         server.trim_end_matches('/')
     );
+    println!("Note");
+    println!("The public URL needs DNS/TLS to work directly in a browser.");
 
     establish_control_channel(server, &created).await?;
 
@@ -100,6 +106,7 @@ async fn run_http(server: &str, port: u16, subdomain: Option<String>) -> Result<
 
 async fn establish_control_channel(server: &str, created: &TunnelCreated) -> Result<()> {
     let websocket_url = build_websocket_url(server);
+    info!(websocket_url, tunnel_id = %created.tunnel_id, "opening control channel");
     let (mut socket, _) = connect_async(websocket_url)
         .await
         .context("failed to open control channel")?;
@@ -113,12 +120,14 @@ async fn establish_control_channel(server: &str, created: &TunnelCreated) -> Res
 
     let registration_ack = read_control_message(&mut socket).await?;
     ensure_registered(registration_ack, &created.tunnel_id)?;
+    info!(tunnel_id = %created.tunnel_id, "relay confirmed client registration");
 
     let http_client = reqwest::Client::new();
     let mut ticker = interval(Duration::from_secs(15));
     loop {
         tokio::select! {
             _ = ticker.tick() => {
+                debug!(tunnel_id = %created.tunnel_id, "sending heartbeat");
                 let heartbeat = ControlMessage::Heartbeat(Heartbeat {
                     tunnel_id: created.tunnel_id.clone(),
                 });
@@ -134,6 +143,7 @@ async fn establish_control_channel(server: &str, created: &TunnelCreated) -> Res
                 }
             }
             _ = tokio::signal::ctrl_c() => {
+                info!(tunnel_id = %created.tunnel_id, "received shutdown signal");
                 break;
             }
         }
@@ -158,24 +168,54 @@ async fn handle_incoming_message(
     match control_message {
         ControlMessage::ForwardRequest(request) => {
             let request_id = request.request_id.clone();
+            info!(
+                tunnel_id,
+                request_id = %request_id,
+                method = %request.method,
+                path = %request.path,
+                query = ?request.query,
+                "received forwarded request"
+            );
             let response = match proxy_local_request(http_client, local_addr, request).await {
-                Ok(response) => response,
-                Err(error) => ForwardResponse {
-                    request_id,
-                    status: 502,
-                    headers: vec![Header {
-                        name: "content-type".to_string(),
-                        value: "text/plain".to_string(),
-                    }],
-                    body_base64: encode_body(format!("proxy error: {error}").as_bytes()),
-                },
+                Ok(response) => {
+                    info!(
+                        tunnel_id,
+                        request_id = %response.request_id,
+                        status = response.status,
+                        "proxied local request"
+                    );
+                    response
+                }
+                Err(error) => {
+                    warn!(
+                        tunnel_id,
+                        request_id = %request_id,
+                        error = %error,
+                        "local proxy request failed"
+                    );
+                    ForwardResponse {
+                        request_id,
+                        status: 502,
+                        headers: vec![Header {
+                            name: "content-type".to_string(),
+                            value: "text/plain".to_string(),
+                        }],
+                        body_base64: encode_body(format!("proxy error: {error}").as_bytes()),
+                    }
+                }
             };
             Ok(Some(ControlMessage::ForwardResponse(response)))
         }
-        ControlMessage::Heartbeat(_) => Ok(None),
+        ControlMessage::Heartbeat(_) => {
+            debug!(tunnel_id, "received heartbeat acknowledgement");
+            Ok(None)
+        }
         ControlMessage::ClientRegistered(ClientRegistered {
             tunnel_id: registered_id,
-        }) if registered_id == tunnel_id => Ok(None),
+        }) if registered_id == tunnel_id => {
+            debug!(tunnel_id, "received duplicate registration confirmation");
+            Ok(None)
+        }
         _ => Ok(None),
     }
 }
@@ -257,6 +297,14 @@ fn public_host(url: &str) -> String {
         .to_string()
 }
 
+fn local_browser_url(server: &str, public_url: &str) -> String {
+    format!(
+        "{}/_openrok/{}/",
+        server.trim_end_matches('/'),
+        public_host(public_url)
+    )
+}
+
 fn parse_created_message(message: ControlMessage) -> Result<TunnelCreated> {
     match message {
         ControlMessage::TunnelCreated(created) => Ok(created),
@@ -323,6 +371,14 @@ mod tests {
 
         assert_eq!(created.tunnel_id, "tnl_demo");
         assert_eq!(created.url, "https://demo.openrok.test");
+    }
+
+    #[test]
+    fn builds_local_browser_url() {
+        assert_eq!(
+            local_browser_url("http://127.0.0.1:8080", "https://demo.openrok.test"),
+            "http://127.0.0.1:8080/_openrok/demo.openrok.test/"
+        );
     }
 
     #[test]
