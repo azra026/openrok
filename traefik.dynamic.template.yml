@@ -1,14 +1,14 @@
 http:
   routers:
     openrok-http:
-      rule: Host(`relay.__OPENROK_DOMAIN__`) || HostRegexp(`^[a-z0-9-]+\\.__OPENROK_DOMAIN__$`)
+      rule: Host(`relay.__OPENROK_DOMAIN__`) || HostRegexp(`^[a-z0-9-]+\.__OPENROK_DOMAIN__$`)
       entryPoints:
         - web
       middlewares:
         - openrok-https-redirect
       service: openrok
     openrok-https:
-      rule: Host(`relay.__OPENROK_DOMAIN__`) || HostRegexp(`^[a-z0-9-]+\\.__OPENROK_DOMAIN__$`)
+      rule: Host(`relay.__OPENROK_DOMAIN__`) || HostRegexp(`^[a-z0-9-]+\.__OPENROK_DOMAIN__$`)
       entryPoints:
         - websecure
       service: openrok
