@@ -51,6 +51,29 @@ docker run --rm -it \
   cargo run -p server -- --bind 0.0.0.0:8080 --domain openrok.test
 ```
 
+Or use Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+The compose stack runs:
+
+- `server`: the Rust relay on the internal Docker network
+- `caddy`: reverse proxy and TLS terminator for `relay.<domain>` and `*.<domain>`
+
+The compose file reads server settings from `.env.server`.
+
+For local TLS, Caddy uses an internal CA via [Caddyfile](/home/jrdelacruz/Work/Personal/Repositories/Azra026/OpenRok/Caddyfile). Browsers will not trust that certificate until you trust Caddy's local root CA. Without trust, use plain HTTP locally or continue using the preview route.
+
+For local DNS, add at least:
+
+```text
+127.0.0.1 relay.openrok.test
+```
+
+Wildcard subdomains such as `demo.openrok.test` still require wildcard DNS or another local DNS solution. `/etc/hosts` is not enough for arbitrary tunnel subdomains.
+
 ## Run The Client
 
 Start your local app first, then run:
@@ -61,7 +84,7 @@ docker run --rm -it \
   -v "$PWD":/workspace \
   -w /workspace \
   rust:1.94 \
-  cargo run -p client -- --server http://127.0.0.1:8080 http 3000 --subdomain demo
+  cargo run -p client -- --server https://relay.openrok.test http 3000 --subdomain demo
 ```
 
 ## Test The Tunnel

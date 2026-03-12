@@ -1,0 +1,33 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: openrok-server
+    env_file:
+      - .env.server
+    environment:
+      OPENROK_BIND: 0.0.0.0:8080
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    container_name: openrok-caddy
+    depends_on:
+      - server
+    env_file:
+      - .env.server
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

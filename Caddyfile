@@ -1,0 +1,4 @@
+relay.{$OPENROK_DOMAIN}, *.{$OPENROK_DOMAIN} {
+    tls internal
+    reverse_proxy server:8080
+}
