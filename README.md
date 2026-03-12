@@ -48,7 +48,7 @@ docker run --rm -it \
   -w /workspace \
   -p 8080:8080 \
   rust:1.94 \
-  cargo run -p server -- --bind 0.0.0.0:8080 --domain openrok.test
+  cargo run -p server -- --bind 0.0.0.0:8080 --domain aturl.xyz
 ```
 
 Or use Docker Compose:
@@ -64,7 +64,7 @@ The compose stack runs:
 
 The compose file reads server settings from `.env.server`.
 
-Traefik forwards all incoming hosts to the relay. The relay still validates `OPENROK_DOMAIN`, so only `relay.<domain>` and matching tunnel subdomains are accepted by the app.
+Traefik explicitly routes `relay.aturl.xyz` and `*.aturl.xyz` to the relay. The relay still validates `OPENROK_DOMAIN`, so only matching hosts are accepted by the app.
 
 Traefik loads a Cloudflare origin certificate from `certs/<domain>.crt` and `certs/<domain>.key`, using the domain from `.env.server`.
 
@@ -97,7 +97,7 @@ docker run --rm -it \
 ## Test The Tunnel
 
 ```bash
-curl -H 'Host: demo.openrok.test' http://127.0.0.1:8080/
+curl -H 'Host: demo.aturl.xyz' http://127.0.0.1:8080/
 ```
 
 The relay uses the `Host` header to select the tunnel and forwards the request to the client, which proxies it to `http://127.0.0.1:3000`.

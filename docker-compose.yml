@@ -14,10 +14,10 @@ services:
       - traefik.enable=true
       - traefik.http.services.openrok.loadbalancer.server.port=8080
       - traefik.http.middlewares.openrok-https-redirect.redirectscheme.scheme=https
-      - traefik.http.routers.openrok-http.rule=HostRegexp(`{host:.+}`)
+      - traefik.http.routers.openrok-http.rule=Host(`relay.aturl.xyz`) || HostRegexp(`{subdomain:[a-z0-9-]+}.aturl.xyz`)
       - traefik.http.routers.openrok-http.entrypoints=web
       - traefik.http.routers.openrok-http.middlewares=openrok-https-redirect
-      - traefik.http.routers.openrok-https.rule=HostRegexp(`{host:.+}`)
+      - traefik.http.routers.openrok-https.rule=Host(`relay.aturl.xyz`) || HostRegexp(`{subdomain:[a-z0-9-]+}.aturl.xyz`)
       - traefik.http.routers.openrok-https.entrypoints=websecure
       - traefik.http.routers.openrok-https.tls=true
     volumes:
