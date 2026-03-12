@@ -1,3 +1,28 @@
+http:
+  routers:
+    openrok-http:
+      rule: Host(`relay.__OPENROK_DOMAIN__`) || HostRegexp(`{subdomain:[a-z0-9-]+}.__OPENROK_DOMAIN__`)
+      entryPoints:
+        - web
+      middlewares:
+        - openrok-https-redirect
+      service: openrok
+    openrok-https:
+      rule: Host(`relay.__OPENROK_DOMAIN__`) || HostRegexp(`{subdomain:[a-z0-9-]+}.__OPENROK_DOMAIN__`)
+      entryPoints:
+        - websecure
+      service: openrok
+      tls: {}
+  middlewares:
+    openrok-https-redirect:
+      redirectScheme:
+        scheme: https
+  services:
+    openrok:
+      loadBalancer:
+        servers:
+          - url: http://server:8080
+
 tls:
   certificates:
     - certFile: /certs/__OPENROK_DOMAIN__.crt

@@ -60,11 +60,11 @@ docker compose up
 The compose stack runs:
 
 - `server`: the Rust relay on the internal Docker network, started with `cargo run -p server`
-- `traefik`: reverse proxy in front of the relay on ports `80` and `443`
+- `traefik`: reverse proxy in front of the relay on ports `80` and `443`, using a rendered file-based config
 
 The compose file reads server settings from `.env.server`.
 
-Traefik explicitly routes `relay.aturl.xyz` and `*.aturl.xyz` to the relay. The relay still validates `OPENROK_DOMAIN`, so only matching hosts are accepted by the app.
+Traefik explicitly routes `relay.aturl.xyz` and `*.aturl.xyz` to `http://server:8080` from a rendered config file. The relay still validates `OPENROK_DOMAIN`, so only matching hosts are accepted by the app.
 
 Traefik loads a Cloudflare origin certificate from `certs/<domain>.crt` and `certs/<domain>.key`, using the domain from `.env.server`.
 
