@@ -1,0 +1,4 @@
+tls:
+  certificates:
+    - certFile: /certs/__OPENROK_DOMAIN__.crt
+      keyFile: /certs/__OPENROK_DOMAIN__.key

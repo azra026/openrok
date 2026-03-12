@@ -1,33 +1,55 @@
 services:
   server:
-    build:
-      context: .
-      dockerfile: Dockerfile.server
+    image: rust:1.94
     container_name: openrok-server
+    working_dir: /workspace
     env_file:
       - .env.server
     environment:
       OPENROK_BIND: 0.0.0.0:8080
+    command: cargo run -p server
     expose:
       - "8080"
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.openrok.loadbalancer.server.port=8080
+      - traefik.http.middlewares.openrok-https-redirect.redirectscheme.scheme=https
+      - traefik.http.routers.openrok-http.rule=HostRegexp(`{host:.+}`)
+      - traefik.http.routers.openrok-http.entrypoints=web
+      - traefik.http.routers.openrok-http.middlewares=openrok-https-redirect
+      - traefik.http.routers.openrok-https.rule=HostRegexp(`{host:.+}`)
+      - traefik.http.routers.openrok-https.entrypoints=websecure
+      - traefik.http.routers.openrok-https.tls=true
+    volumes:
+      - .:/workspace
     restart: unless-stopped
 
-  caddy:
-    image: caddy:2
-    container_name: openrok-caddy
+  traefik:
+    image: traefik:v3.0
+    container_name: openrok-traefik
     depends_on:
       - server
     env_file:
       - .env.server
+    entrypoint:
+      - /bin/sh
+    command:
+      - -c
+      - |
+        sed "s/__OPENROK_DOMAIN__/$${OPENROK_DOMAIN}/g" /etc/traefik/traefik.dynamic.template.yml > /etc/traefik/dynamic.yml
+        exec traefik \
+          --providers.docker=true \
+          --providers.docker.exposedbydefault=false \
+          --providers.file.filename=/etc/traefik/dynamic.yml \
+          --entrypoints.web.address=:80 \
+          --entrypoints.websecure.address=:443 \
+          --log.level=INFO \
+          --accesslog=true
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./certs:/certs:ro
+      - ./traefik.dynamic.template.yml:/etc/traefik/traefik.dynamic.template.yml:ro
     restart: unless-stopped
-
-volumes:
-  caddy_data:
-  caddy_config:

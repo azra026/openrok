@@ -36,7 +36,7 @@ Server defaults live in `.env.server`:
 
 ```env
 OPENROK_BIND=127.0.0.1:8080
-OPENROK_DOMAIN=openrok.test
+OPENROK_DOMAIN=aturl.xyz
 OPENROK_CREATE_LIMIT_PER_MINUTE=20
 ```
 
@@ -54,25 +54,32 @@ docker run --rm -it \
 Or use Docker Compose:
 
 ```bash
-docker compose up --build
+docker compose up
 ```
 
 The compose stack runs:
 
-- `server`: the Rust relay on the internal Docker network
-- `caddy`: reverse proxy and TLS terminator for `relay.<domain>` and `*.<domain>`
+- `server`: the Rust relay on the internal Docker network, started with `cargo run -p server`
+- `traefik`: reverse proxy in front of the relay on ports `80` and `443`
 
 The compose file reads server settings from `.env.server`.
 
-For local TLS, Caddy uses an internal CA via [Caddyfile](/home/jrdelacruz/Work/Personal/Repositories/Azra026/OpenRok/Caddyfile). Browsers will not trust that certificate until you trust Caddy's local root CA. Without trust, use plain HTTP locally or continue using the preview route.
+Traefik forwards all incoming hosts to the relay. The relay still validates `OPENROK_DOMAIN`, so only `relay.<domain>` and matching tunnel subdomains are accepted by the app.
+
+Traefik loads a Cloudflare origin certificate from `certs/<domain>.crt` and `certs/<domain>.key`, using the domain from `.env.server`.
+
+Important:
+- the domain in `.env.server` must match the cert filenames
+- Cloudflare origin certs are meant for Cloudflare-to-origin traffic, not direct browser trust
+- if requests go through Cloudflare proxy, use SSL mode `Full (strict)`
 
 For local DNS, add at least:
 
 ```text
-127.0.0.1 relay.openrok.test
+127.0.0.1 relay.aturl.xyz
 ```
 
-Wildcard subdomains such as `demo.openrok.test` still require wildcard DNS or another local DNS solution. `/etc/hosts` is not enough for arbitrary tunnel subdomains.
+Wildcard subdomains such as `demo.aturl.xyz` still require wildcard DNS or another local DNS solution. `/etc/hosts` is not enough for arbitrary tunnel subdomains.
 
 ## Run The Client
 
@@ -84,7 +91,7 @@ docker run --rm -it \
   -v "$PWD":/workspace \
   -w /workspace \
   rust:1.94 \
-  cargo run -p client -- --server https://relay.openrok.test http 3000 --subdomain demo
+  cargo run -p client -- --server https://relay.aturl.xyz http 3000 --subdomain demo
 ```
 
 ## Test The Tunnel
